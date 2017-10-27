@@ -11,11 +11,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::mem;
+
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::{self, ThreadId};
+use std::thread::{ThreadId, self};
 
 use grpc_sys::{self, GprClockType, GrpcCompletionQueue};
 use futures::Async;
@@ -23,7 +23,7 @@ use futures::future::BoxFuture;
 use futures::executor::{Notify, Spawn};
 use mio::util::BoundedQueue;
 
-use async::{Alarm, CallTag, SpinLock};
+use async::{SpinLock, Alarm, CallTag};
 
 pub use grpc_sys::GrpcCompletionType as EventType;
 pub use grpc_sys::GrpcEvent as Event;
@@ -59,8 +59,9 @@ pub struct CompletionQueue {
 
 impl CompletionQueue {
     pub fn new(handle: Arc<CompletionQueueHandle>, id: ThreadId) -> CompletionQueue {
-        let fq = ReadyQueue {
-            items: SpinLock::new(Vec::with_capacity(BATCH_SIZE)),
+       let fq = ReadyQueue {
+            queue: BoundedQueue::with_capacity(BATCH_SIZE * 2),
+            pending: AtomicUsize::new(0),
             worker_id: id,
         };
         CompletionQueue {
@@ -109,7 +110,9 @@ const BATCH_SIZE: usize = 1024;
 type Item = Spawn<BoxFuture<(), ()>>;
 
 struct ReadyQueue {
-    items: SpinLock<Vec<Item>>,
+    // TODO: use std::sync::mpsc::Receiver instead.
+    queue: BoundedQueue<Item>,
+    pending: AtomicUsize,
     worker_id: ThreadId,
 }
 
@@ -120,17 +123,19 @@ impl ReadyQueue {
     fn push_and_notify(&self, mut f: Item, cq: CompletionQueue) {
         let notify = QueueNotify::new(cq.clone());
 
-        if thread::current().id() == self.worker_id {
+        if thread::current().id()  == self.worker_id {
             let notify = Arc::new(notify);
             poll(f, &notify);
         } else {
-            let count = {
-                let mut items = self.items.lock();
-                items.push(f);
-                items.len()
-            };
-
-            if 1 == count {
+            loop {
+                if let Err(out) = self.queue.push(f) {
+                    f = out;
+                } else {
+                    break;
+                }
+            }
+            let pending = self.pending.fetch_add(1, Ordering::SeqCst);
+            if 0 == pending {
                 let alarm = notify.alarm.clone();
                 let tag = Box::new(CallTag::Queue(notify));
                 let mut al = alarm.lock();
@@ -146,12 +151,34 @@ impl ReadyQueue {
         notify.alarm = Arc::new(SpinLock::new(None));
         let mut notify = Arc::new(notify);
 
-        let mut batch: Vec<Item> = Vec::with_capacity(64); 
-	{
-            let mut items = self.items.lock();
-	    mem::swap(&mut *items, &mut batch);
-            //batch = items.drain(..).collect();
-        };
+        let mut batch = Vec::with_capacity(BATCH_SIZE);
+        let mut pending;
+        loop {
+            pending = self.pending.load(Ordering::SeqCst);
+            if pending == 0 {
+                // TODO: There must be at least one ready future in the queue.
+                // To make sure that at the first loop, pending should be zero.
+                break;
+            }
+
+            // Batch full.
+            if BATCH_SIZE == batch.len() {
+                break;
+            }
+
+            match self.queue.pop() {
+                Some(f) => {
+                    assert_ne!(self.pending.fetch_sub(1, Ordering::SeqCst), 0);
+                    batch.push(f);
+                }
+                None => {
+                    if !batch.is_empty() {
+                        // Do not wait for more ready futures.
+                        break;
+                    }
+                }
+            }
+        }
 
         let mut done = true;
         for f in batch {
@@ -170,6 +197,18 @@ impl ReadyQueue {
         if done {
             notify.alarm.lock().take();
         }
+
+        // There are still pending ready futures, poll them later.
+        if pending != 0 {
+            let notify = QueueNotify::new(cq.clone());
+            let alarm = notify.alarm.clone();
+            let tag = Box::new(CallTag::Queue(notify));
+
+            let mut al = alarm.lock();
+            // We need to keep the alarm until it arrives in the CQ.
+            *al = Some(Alarm::new(&cq, tag));
+            al.as_mut().unwrap().alarm();
+        }
     }
 }
 
@@ -177,7 +216,8 @@ fn poll(f: Item, notify: &Arc<QueueNotify>) -> bool {
     let mut option = notify.f.lock();
     *option = Some(f);
     match option.as_mut().unwrap().poll_future_notify(notify, 0) {
-        Err(_) | Ok(Async::Ready(_)) => {
+        Err(_) |
+        Ok(Async::Ready(_)) => {
             // Future has resloved, empty the future so that we can
             // reuse the notify.
             option.take();
@@ -227,4 +267,3 @@ impl Notify for QueueNotify {
         }
     }
 }
-
