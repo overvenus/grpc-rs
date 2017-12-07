@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+// Copyright 2015 gRPC authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -8,26 +8,28 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+syntax = "proto3";
 
-extern crate futures;
-extern crate grpcio;
-extern crate protobuf;
+package grpc.health.v1;
+option csharp_namespace = "Grpc.Health.V1";
 
-pub mod testing {
-    include!(concat!(env!("OUT_DIR"), "/testing/mod.rs"));
+message HealthCheckRequest {
+  string service = 1;
 }
 
-pub mod example {
-    include!(concat!(env!("OUT_DIR"), "/example/mod.rs"));
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
 }
 
-pub mod health {
-    pub mod v1 {
-        include!(concat!(env!("OUT_DIR"), "/health/mod.rs"));
-    }
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
 }
-
-pub mod util;
