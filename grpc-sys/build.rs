@@ -611,6 +611,11 @@ fn main() {
     }
     cc.file("grpc_wrap.cc");
     if cfg!(feature = "internals") {
+        if cfg!(target_env = "msvc") {
+            // grpc_wrap_internals.cc include <ostream> which uses C++ exception
+            // handler. Specify -EHsc to use unwind semantics.
+            cc.flag("-EHsc");
+        }
         cc.file("grpc_wrap_internals.cc");
     }
     cc.warnings_into_errors(true);
