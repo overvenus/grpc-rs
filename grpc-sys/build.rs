@@ -586,9 +586,6 @@ fn main() {
     if get_env("CARGO_CFG_TARGET_OS").map_or(false, |s| s == "windows") {
         // At lease vista
         cc.define("_WIN32_WINNT", Some("0x600"));
-        // Disable warnings from included files on windows.
-        cc.flag("-external:W0");
-        cc.flag("-external:anglebrackets");
     }
 
     if !cfg!(feature = "internals")
@@ -612,9 +609,12 @@ fn main() {
     cc.file("grpc_wrap.cc");
     if cfg!(feature = "internals") {
         if cfg!(target_env = "msvc") {
-            // grpc_wrap_internals.cc include <ostream> which uses C++ exception
-            // handler. Specify -EHsc to use unwind semantics.
+            // grpc_wrap_internals.cc includes <ostream> implicitly which uses
+            // C++ exception handler. Specify -EHsc to use unwind semantics.
             cc.flag("-EHsc");
+            // Disable warnings from included files on windows.
+            cc.flag("-external:W0");
+            cc.flag("-external:anglebrackets");
         }
         cc.file("grpc_wrap_internals.cc");
     }
